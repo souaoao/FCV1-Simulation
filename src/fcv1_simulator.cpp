@@ -12,6 +12,8 @@
 #include <string>
 #include <fstream>
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
 
 
 // constexpr float stone_radius = 0.145f;
@@ -226,9 +228,23 @@ void SimulatorFCV1::is_in_playarea()
 //     }
 // }
 
-void SimulatorFCV1::step(float seconds_per_frame)
+void SimulatorFCV1::step(float seconds_per_frame, bool record_trajectories)
 {
     int step_i = 0;
+    if (record_trajectories)
+    {
+        for (size_t index = 0; index < kStoneMax; ++index)
+        {
+            trajectory_points[index].clear();
+            trajectory_active[index] = stone_bodies[index]->IsEnabled();
+            trajectory_out[index] = false;
+            if (trajectory_active[index])
+            {
+                const b2Vec2 position = stone_bodies[index]->GetPosition();
+                trajectory_points[index].push_back({position.x, position.y});
+            }
+        }
+    }
 
     // simulate
     // 正しい繰り返し：現在起きている石の集合を毎フレーム再構築する（走査中に is_awake を変更しない）
@@ -250,6 +266,11 @@ void SimulatorFCV1::step(float seconds_per_frame)
                 // ストーンがシート外の場合は初期位置へ戻して除外 ただし、y座標方向については今回だけ無視
                 if (stone_position.x > stone_x_upper_limit || stone_x_lower_limit > stone_position.x || stone_y_upper_limit < stone_position.y)
                 {
+                    if (record_trajectories && trajectory_active[index] && !trajectory_out[index])
+                    {
+                        trajectory_points[index].push_back({0.f, 0.f});
+                        trajectory_out[index] = true;
+                    }
                     auto stone = stones[index];
                     stone_bodies[index]->SetTransform(b2Vec2(0.f, 0.f), 0.f);
                     stone_bodies[index]->SetLinearVelocity(b2Vec2_zero);
@@ -327,10 +348,60 @@ void SimulatorFCV1::step(float seconds_per_frame)
         is_awake.swap(next_awake);
 
         step_i += 1;
+        if (record_trajectories && step_i % 33 == 0)
+        {
+            for (size_t index = 0; index < kStoneMax; ++index)
+            {
+                if (trajectory_active[index] && !trajectory_out[index])
+                {
+                    const b2Vec2 position = stone_bodies[index]->GetPosition();
+                    trajectory_points[index].push_back({position.x, position.y});
+                }
+            }
+        }
         if (step_i > 50000) {
             break;
         }
     }
+}
+
+py::list SimulatorFCV1::get_trajectory_blobs()
+{
+    static_assert(sizeof(float) == 4, "Trajectory format requires 32-bit float");
+    py::list result;
+    for (size_t index = 0; index < kStoneMax; ++index)
+    {
+        if (!trajectory_active[index])
+        {
+            result.append(py::none());
+            continue;
+        }
+        const b2Vec2 final_position = stone_bodies[index]->GetPosition();
+        if ((final_position.x != 0.f || final_position.y != 0.f) && trajectory_out[index])
+        {
+            trajectory_points[index].pop_back();
+            trajectory_out[index] = false;
+        }
+        if (final_position.x == 0.f && final_position.y == 0.f && !trajectory_out[index])
+        {
+            trajectory_points[index].push_back({0.f, 0.f});
+            trajectory_out[index] = true;
+        }
+        std::string bytes;
+        bytes.reserve(trajectory_points[index].size() * 8);
+        for (const StonePosition point : trajectory_points[index])
+        {
+            for (const float coordinate : {point.x, point.y})
+            {
+                std::uint32_t bits;
+                std::memcpy(&bits, &coordinate, sizeof(bits));
+                for (int shift = 0; shift < 32; shift += 8)
+                    bytes.push_back(static_cast<char>((bits >> shift) & 0xff));
+            }
+        }
+        result.append(py::bytes(bytes));
+    }
+    return result;
 }
 
 void SimulatorFCV1::set_stones()
@@ -513,7 +584,7 @@ py::array_t<double> StoneSimulator::simulator(py::array_t<double> team0_stone_po
                                             this->shot_per_team,
                                             this->team_id,
                                             i);
-        simulators[thread_id]->step(0.001f);
+        simulators[thread_id]->step(0.001f, record_trajectories);
         simulators[thread_id]->is_in_playarea();
 
         // move で代入（get_stones() の戻り値をムーブする）
@@ -542,6 +613,35 @@ py::array_t<double> StoneSimulator::simulator(py::array_t<double> team0_stone_po
     return result;
 }
 
+py::tuple StoneSimulator::simulator_with_trajectories(
+    py::array_t<double> team0_stone_positions,
+    py::array_t<double> team1_stone_positions,
+    int total_shot,
+    py::array_t<double> x_velocity,
+    py::array_t<double> y_velocity,
+    py::array_t<int> angular_sign,
+    unsigned int team_id,
+    unsigned int shot_per_team,
+    unsigned int hummer_team)
+{
+    if (x_velocity.size() != 1 || y_velocity.size() != 1 || angular_sign.size() != 1)
+        throw std::invalid_argument("Trajectory simulation requires exactly one velocity");
+    record_trajectories = true;
+    try
+    {
+        py::array_t<double> positions = simulator(
+            team0_stone_positions, team1_stone_positions, total_shot,
+            x_velocity, y_velocity, angular_sign, team_id, shot_per_team, hummer_team);
+        record_trajectories = false;
+        return py::make_tuple(positions, simulators[0]->get_trajectory_blobs());
+    }
+    catch (...)
+    {
+        record_trajectories = false;
+        throw;
+    }
+}
+
 
 
 // main関数
@@ -550,5 +650,6 @@ PYBIND11_MODULE(simulator, m)
 {
     py::class_<StoneSimulator>(m, "StoneSimulator")
         .def(py::init<>())
-        .def("simulator", &StoneSimulator::simulator);
+        .def("simulator", &StoneSimulator::simulator)
+        .def("simulator_with_trajectories", &StoneSimulator::simulator_with_trajectories);
 }

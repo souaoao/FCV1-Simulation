@@ -291,10 +291,11 @@ public:
     void is_in_playarea();
     // void on_center_line();
     // void no_tick_rule();
-    void step(float seconds_per_frame);
+    void step(float seconds_per_frame, bool record_trajectories = false);
     void set_stones();
     void set_velocity(float velocity_x, float velocity_y, float angular_velocity, unsigned int shot_per_team, unsigned int team_id, int id);
     digitalcurling3::StoneDataWithID get_stones();
+    py::list get_trajectory_blobs();
 
 private:
     ContactListener contact_listener_;
@@ -311,6 +312,9 @@ private:
     b2World world;
     b2BodyDef stone_body_def;
     std::array<b2Body *, static_cast<std::size_t>(kStoneMax)> stone_bodies;
+    std::array<std::vector<StonePosition>, static_cast<std::size_t>(kStoneMax)> trajectory_points;
+    std::array<bool, static_cast<std::size_t>(kStoneMax)> trajectory_active{};
+    std::array<bool, static_cast<std::size_t>(kStoneMax)> trajectory_out{};
 };
 
 #pragma GCC visibility push(hidden)
@@ -318,6 +322,7 @@ class StoneSimulator {
 public:
     StoneSimulator();
     py::array_t<double> simulator(py::array_t<double> team0_stone_positions, py::array_t<double> team1_stone_positions, int total_shot, pybind11::array_t<double> x_velocity, pybind11::array_t<double> y_velocity, pybind11::array_t<int> angular_sign, unsigned int first_team_hummer, unsigned int shot_per_team, unsigned int hummer_team);
+    py::tuple simulator_with_trajectories(py::array_t<double> team0_stone_positions, py::array_t<double> team1_stone_positions, int total_shot, pybind11::array_t<double> x_velocity, pybind11::array_t<double> y_velocity, pybind11::array_t<int> angular_sign, unsigned int team_id, unsigned int shot_per_team, unsigned int hummer_team);
 
 private:
     std::vector<digitalcurling3::StoneData> storage;
@@ -343,5 +348,6 @@ private:
     int thread_id;
     int index;
     int x_velocities_length;
+    bool record_trajectories = false;
 };
 
